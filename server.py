@@ -136,8 +136,6 @@ def cleanup_cache():
     print("\nServer shutting down. Goodbye!")
     
 atexit.register(cleanup_cache)
-rn
-
 # --- 3. Helper Functions (Your original logic) ---
 
 def get_gemini_code(user_query: str) -> str:
