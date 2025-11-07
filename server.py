@@ -5,30 +5,25 @@ import tempfile
 import os
 import json
 import textwrap
+import datetime
 from flask import Flask, request, jsonify, abort
 import atexit
 
-# --- 1. Configuration ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Make sure to set this in your environment or paste it here
 try:
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 except KeyError:
     print("Error: GEMINI_API_KEY environment variable not set.")
-    # You can paste it here directly for testing:
+
     GEMINI_API_KEY = "AIzaSyCUtaj7lk7yCQ88H3w-zpwcI9vExE7m7Qg" 
     
    
 
-# Define your data file and columns
 EXCEL_FILE = "Trial_Balance.xlsx"
 DATA_COLUMNS = "[GL, GL Name, Gr GL, Gr GL Name, Amount, FS Grouping Main Head, FS Grouping Main Sub Head]"
+TEMP_FILE_DIR = os.path.join(SCRIPT_DIR, "Logs")
 
-# This is the "brain" of the AI
-# This is the "brain" of the AI
-# This is the "brain" of the AI
-# This is the "brain" of the AI
-# This is the "brain" of the AI
 SYSTEM_PROMPT = f"""
 You are an expert Python Pandas code assistant.
 A pandas DataFrame named `data` has already been loaded from the Excel file '{EXCEL_FILE}' using pd.read_excel(..., header=2, usecols="A:G").
@@ -114,6 +109,17 @@ def setup_server():
     except Exception as e:
         print(f"FATAL ERROR: Error checking data file: {e}")
         exit()
+    try:
+        if not os.path.exists(TEMP_FILE_DIR):
+            os.makedirs(TEMP_FILE_DIR)
+            print(f"Created query log directory: {TEMP_FILE_DIR}")
+        else:
+            print(f"Query log directory found: {TEMP_FILE_DIR}")
+    except Exception as e:
+        print(f"FATAL ERROR: Could not create directory {TEMP_FILE_DIR}: {e}")
+        exit()
+    
+    
         
     @app.teardown_appcontext
     def cleanup(exception=None):
@@ -130,7 +136,7 @@ def cleanup_cache():
     print("\nServer shutting down. Goodbye!")
     
 atexit.register(cleanup_cache)
-
+rn
 
 # --- 3. Helper Functions (Your original logic) ---
 
@@ -149,21 +155,30 @@ def get_gemini_code(user_query: str) -> str:
     except Exception as e:
         print(f"Error communicating with Gemini: {e}")
         return ""
-def execute_code(code: str) -> tuple[str, str]:
-    """Wraps code, saves to temp file, and runs it in a subprocess."""
+
+def execute_code(code: str, user_query: str) -> tuple[str, str]:
+    """Wraps code, saves to a timestamped file, and runs it."""
     
     indented_code = textwrap.indent(code, '    ')
 
-    # This script_content now loads the Excel file directly
+    # IMPORTANT: We must escape backslashes in the file paths for the f-string
+    # This turns 'C:\Users...' into 'C:\\Users...' for the Python script
+    excel_file_path_for_script = EXCEL_FILE.replace("\\", "\\\\")
+
     script_content = f"""
+# --- USER QUERY ---
+# {user_query}
+# --------------------
+
 import pandas as pd
 import warnings
+import os
 warnings.simplefilter(action='ignore', category=FutureWarning)
 pd.options.display.float_format = '{{:,.2f}}'.format
 
 try:
-    # *** This is your new line, loading the Excel file directly ***
-    data = pd.read_excel("{EXCEL_FILE}", header=2, usecols="A:G")
+    # Use the full, escaped path to the Excel file
+    data = pd.read_excel(r"{excel_file_path_for_script}", header=2, usecols="A:G")
     
     # --- This is the code from Gemini (now correctly indented) ---
 {indented_code}
@@ -175,11 +190,19 @@ except Exception as e:
     print(f"An error occurred: {{e}}")
 """
     
+    # 1. Get the current time
+    now = datetime.datetime.now()
+    
+    # 2. Create the short filename (with microseconds)
+    short_filename = now.strftime("%Y.%m.%d_%H.%M.%S.py")
+    
+    # 3. Join with the 'Logs' directory (absolute path)
+    temp_file_name = os.path.join(TEMP_FILE_DIR, short_filename)
+        
     try:
-        # This will create and save the temp .py file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=".") as f:
+        # 4. Create and write to that absolute path
+        with open(temp_file_name, 'w', encoding='utf-8') as f:
             f.write(script_content)
-            temp_file_name = f.name
         
         print(f"Running temp file: {temp_file_name}")
 
@@ -187,55 +210,58 @@ except Exception as e:
             ['python', temp_file_name],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            encoding='utf-8'
         )
         
         return result.stdout, result.stderr
         
     finally:
-        # We are still keeping the temp .py files for debugging
-        # if 'temp_file_name' in locals() and os.path.exists(temp_file_name):
-        #     os.remove(temp_file_name)
+        # We are keeping the temp .py files for logging
         pass
-
 # --- 4. API Endpoint ---
 
 @app.route("/query", methods=["POST"])
+@app.route("/query", methods=["GET", "POST"])  # <-- Now accepts GET and POST
 def handle_query():
     """
     The main API endpoint. Takes a natural language query
     and returns the result from the DataFrame.
     """
-    # Get the JSON data from the request
-    data = request.get_json()
-    if not data or 'query' not in data:
-        abort(400, description="Invalid request: JSON body with 'query' key is required.")
+    user_query = None
+    
+    if request.method == "POST":
+        data = request.get_json()
+        if not data or 'query' not in data:
+            abort(400, description="Invalid POST: JSON body with 'query' key is required.")
+        user_query = data['query']
         
-    user_query = data['query']
+    elif request.method == "GET":
+        user_query = request.args.get("query")
+        if not user_query:
+            abort(400, description="Invalid GET: URL parameter 'query' is required. (e.g., /query?query=your question)")
+
     if not user_query:
         abort(400, description="Invalid request: 'query' cannot be empty.")
         
     try:
-        # Step 1: Get code from Gemini
         generated_code = get_gemini_code(user_query)
         if not generated_code:
-            # Return a 500 internal server error
-            return jsonify({"error": "Gemini failed to generate code."}), 500
+            return "Error: Gemini failed to generate code.", 500
             
-        # Step 2: Run code safely
-        stdout, stderr = execute_code(generated_code)
+        # *** CHANGE 1: Pass the user_query to execute_code ***
+        stdout, stderr = execute_code(generated_code, user_query)
         
-        # Step 3: Return the result
-        return jsonify({
-            "output": stdout,
-            "error": stderr if stderr else None,
-            "generated_code": generated_code
-        })
+        # *** CHANGE 2: Return plain text, not JSON ***
+        if stderr:
+            # If there was an error in the script, return it
+            return f"An error occurred:\n{stderr}", 500
+        else:
+            # If successful, return ONLY the clean output
+            return stdout.strip(), 200
         
     except Exception as e:
-        # Return a 500 internal server error
-        return jsonify({"error": f"An internal server error occurred: {str(e)}"}), 500
-
+        return f"An internal server error occurred: {str(e)}", 500
 # --- 5. Run the server ---
 if __name__ == "__main__":
     setup_server() # Run the setup
